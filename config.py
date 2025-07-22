@@ -121,14 +121,14 @@ def normalize_and_validate_config(config_data: Dict[str, Any]):
          )
          openrouter_config["free_only"] = default_free_only
 
-    default_google_rate_delay = 0
-    if not isinstance(openrouter_config.get("google_rate_delay"), (int, float)):
+    default_global_rate_delay = 0
+    if not isinstance(openrouter_config.get("global_rate_delay"), (int, float)):
          logger.warning(
-             "'openrouter.google_rate_delay' missing or invalid in config.yml. "
+             "'openrouter.global_rate_delay' missing or invalid in config.yml. "
              "Using default: %s",
-             default_google_rate_delay
+             default_global_rate_delay
          )
-         openrouter_config["google_rate_delay"] = default_google_rate_delay
+         openrouter_config["global_rate_delay"] = default_global_rate_delay
 
     # --- Request Proxy Section ---
     if not isinstance(config_data.get("requestProxy"), dict):

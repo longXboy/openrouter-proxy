@@ -1,6 +1,6 @@
 # OpenRouter Proxy
 
-A simple proxy server for OpenRouter API that helps bypass rate limits on free API keys 
+A simple proxy server for OpenRouter API that helps bypass rate limits on free API keys
 by rotating through multiple API keys in a round-robin fashion.
 
 ## Features
@@ -64,10 +64,12 @@ openrouter:
   # Time in seconds to temporarily disable a key when rate limit is reached by default
   rate_limit_cooldown: 14400  # 4 hours
   free_only: false # try to show only free models
-  # Google sometimes returns 429 RESOURCE_EXHAUSTED errors repeatedly, which can cause Roo Code to stop.
-  # This prevents repeated failures by introducing a delay before retrying.
-  # google_rate_delay: 10 # in sec
-  google_rate_delay: 0
+  # OpenRouter can return a 429 error if a model is overloaded.
+  # Additionally, Google sometimes returns 429 RESOURCE_EXHAUSTED errors repeatedly,
+  # which can cause Roo Code to stop.
+  # This option prevents repeated failures by introducing a delay before retrying.
+  # global_rate_delay: 10 # in seconds
+  global_rate_delay: 0
 
 # Proxy settings for outgoing requests to OpenRouter
 requestProxy:

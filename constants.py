@@ -10,3 +10,8 @@ CONFIG_FILE = "config.yml"
 RATE_LIMIT_ERROR_CODE = 429
 
 MODELS_ENDPOINTS = ["/api/v1/models"]
+
+GLOBAL_LIMIT_PATTERN = "is temporarily rate-limited upstream"
+
+GOOGLE_LIMIT_ERROR = "Google returned RESOURCE_EXHAUSTED code"
+GLOBAL_LIMIT_ERROR = "Model is temporarily rate-limited upstream"

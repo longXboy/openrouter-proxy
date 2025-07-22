@@ -11,7 +11,7 @@ from typing import Optional, Tuple
 from fastapi import Header, HTTPException
 
 from config import config, logger
-from constants import RATE_LIMIT_ERROR_CODE
+from constants import RATE_LIMIT_ERROR_CODE, GOOGLE_LIMIT_ERROR, GLOBAL_LIMIT_ERROR, GLOBAL_LIMIT_PATTERN
 
 
 def get_local_ip() -> str:
@@ -57,7 +57,22 @@ async def verify_access_key(
     return True
 
 
-async def is_google_error(data: str) -> bool:
+def check_global_limit(data: str) -> Optional[str]:
+    """
+    Checks for a global rate limit error message from OpenRouter.
+
+    Example message:
+    "google/gemini-2.0-flash-exp:free is temporarily rate-limited upstream.
+    Please retry shortly, or add your own key to accumulate your rate limits:
+    https://openrouter.ai/settings/integrations"
+    """
+    if isinstance(data, str) and GLOBAL_LIMIT_PATTERN in data:
+        logger.warning("Model %s is overloaded.", data.split(' ', 1)[0])
+        return GLOBAL_LIMIT_ERROR
+    return None
+
+
+def check_google_error(data: str) -> Optional[str]:
     # data = {
     #     'error': {
     #         'code': 429,
@@ -84,23 +99,9 @@ async def is_google_error(data: str) -> bool:
         except Exception as e:
             logger.info("Json.loads error %s", e)
         else:
-            if data["error"].get("status", "") == "RESOURCE_EXHAUSTED":
-                if config["openrouter"]["google_rate_delay"]:
-                    # I think this is global rate limit, so 'retryDelay' is useless
-                    # try:
-                    #     retry_info = next(
-                    #         (item for item in data['error']['details']
-                    #          if item.get('@type') == 'type.googleapis.com/google.rpc.RetryInfo'), {}
-                    #     )
-                    #     retry_delay = retry_info['retryDelay']
-                    #     retry_delay_s = int(''.join(c for c in retry_delay if c.isdigit()))
-                    # except (TypeError, KeyError, ValueError) as _:
-                    #     retry_delay_s = GOOGLE_DELAY
-                    logger.info("Google returned RESOURCE_EXHAUSTED, wait %s sec",
-                                config["openrouter"]["google_rate_delay"])
-                    await asyncio.sleep(config["openrouter"]["google_rate_delay"])
-                return True
-    return False
+            if data.get("error", {}).get("status", "") == "RESOURCE_EXHAUSTED":
+                return GOOGLE_LIMIT_ERROR
+    return None
 
 
 async def check_rate_limit(data: str or bytes) -> Tuple[bool, Optional[int]]:
@@ -125,9 +126,13 @@ async def check_rate_limit(data: str or bytes) -> Tuple[bool, Optional[int]]:
             try:
                 x_rate_limit = int(err["error"]["metadata"]["headers"]["X-RateLimit-Reset"])
             except (TypeError, KeyError):
-                if (code == RATE_LIMIT_ERROR_CODE and
-                        await is_google_error(err["error"].get("metadata", {}).get("raw", ""))):
-                    return False, None
+                if code == RATE_LIMIT_ERROR_CODE and (raw := err["error"].get("metadata", {}).get("raw", "")):
+                    issue = check_global_limit(raw) or check_google_error(raw)
+                    if issue:
+                        if config["openrouter"]["global_rate_delay"]:
+                            logger.info("%s, waiting %s seconds.", issue, config["openrouter"]["global_rate_delay"])
+                            await asyncio.sleep(config["openrouter"]["global_rate_delay"])
+                        return False, None
                 x_rate_limit = 0
 
             if x_rate_limit > 0:
