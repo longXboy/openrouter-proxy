@@ -1,5 +1,5 @@
 fastapi~=0.111.0
 uvicorn~=0.27.0
 pyyaml~=6.0.1
-httpx[socks]~=0.25.0
+httpx[socks]~=0.28.0
 brotlicffi~=1.1.0.0
