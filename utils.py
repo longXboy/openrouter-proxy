@@ -14,6 +14,20 @@ from config import config, logger
 from constants import RATE_LIMIT_ERROR_CODE, GOOGLE_LIMIT_ERROR, GLOBAL_LIMIT_ERROR, GLOBAL_LIMIT_PATTERN
 
 
+def _format_for_log(value: str | bytes | None, limit: int = 1000) -> str:
+    if value is None:
+        return "None"
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("utf-8")
+        except UnicodeDecodeError:
+            value = value.decode("utf-8", "ignore")
+    text = str(value)
+    if len(text) > limit:
+        return f"{text[:limit]}... (truncated)"
+    return text
+
+
 def get_local_ip() -> str:
     """Get local IP address for displaying in logs."""
     try:
@@ -104,7 +118,12 @@ def check_google_error(data: str) -> Optional[str]:
     return None
 
 
-async def check_rate_limit(data: str or bytes) -> Tuple[bool, Optional[int]]:
+async def check_rate_limit(
+    data: str | bytes,
+    *,
+    request_body: str | bytes | None = None,
+    response_status: Optional[int] = None,
+) -> Tuple[bool, Optional[int]]:
     """
     Check for rate limit error.
 
@@ -120,6 +139,12 @@ async def check_rate_limit(data: str or bytes) -> Tuple[bool, Optional[int]]:
         err = json.loads(data)
     except Exception as e:
         logger.warning('Json.loads error %s', e)
+        logger.warning(
+            'Json decode failed. status=%s request_body=%s response_body=%s',
+            response_status,
+            _format_for_log(request_body),
+            _format_for_log(data),
+        )
     else:
         if isinstance(err, dict) and "error" in err:
             code = err["error"].get("code", 0)

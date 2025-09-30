@@ -45,11 +45,21 @@ async def get_async_client(request: Request) -> httpx.AsyncClient:
     return request.app.state.http_client
 
 
-async def check_httpx_err(body: str | bytes, api_key: Optional[str]):
+async def check_httpx_err(
+    body: str | bytes,
+    api_key: Optional[str],
+    *,
+    request_body: str | bytes | None = None,
+    response_status: Optional[int] = None,
+):
     # too big or small for error
     if 10 > len(body) > 4000 or not api_key:
         return
-    has_rate_limit_error, reset_time_ms = await check_rate_limit(body)
+    has_rate_limit_error, reset_time_ms = await check_rate_limit(
+        body,
+        request_body=request_body,
+        response_status=response_status,
+    )
     if has_rate_limit_error:
         await key_manager.disable_key(api_key, reset_time_ms)
 
@@ -125,11 +135,12 @@ async def proxy_with_httpx(
     """Core logic to proxy requests."""
     free_only = (any(f"/api/v1{path}" == ep for ep in MODELS_ENDPOINTS) and
                  config["openrouter"]["free_only"])
+    request_body_bytes = await request.body()
     req_kwargs = {
         "method": request.method,
         "url": f"{config['openrouter']['base_url']}{path}",
         "headers": prepare_forward_headers(request),
-        "content": await request.body(),
+        "content": request_body_bytes,
         "params": request.query_params,
     }
     if api_key:
@@ -156,7 +167,12 @@ async def proxy_with_httpx(
 
         if not is_stream:
             body = openrouter_resp.content
-            await check_httpx_err(body, api_key)
+            await check_httpx_err(
+                body,
+                api_key,
+                request_body=request_body_bytes,
+                response_status=openrouter_resp.status_code,
+            )
             if free_only:
                 body = remove_paid_models(body)
             return Response(
@@ -177,7 +193,12 @@ async def proxy_with_httpx(
                 logger.error("sse_stream error: %s", err)
             finally:
                 await openrouter_resp.aclose()
-            await check_httpx_err(last_json, api_key)
+            await check_httpx_err(
+                last_json,
+                api_key,
+                request_body=request_body_bytes,
+                response_status=openrouter_resp.status_code,
+            )
 
 
         return StreamingResponse(
@@ -187,7 +208,12 @@ async def proxy_with_httpx(
             headers=headers,
         )
     except httpx.HTTPStatusError as e:
-        await check_httpx_err(e.response.content, api_key)
+        await check_httpx_err(
+            e.response.content,
+            api_key,
+            request_body=request_body_bytes,
+            response_status=e.response.status_code,
+        )
         logger.error("Request error: %s", str(e))
         raise HTTPException(e.response.status_code, str(e.response.content)) from e
     except httpx.ConnectError as e:
