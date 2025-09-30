@@ -135,35 +135,40 @@ async def check_rate_limit(
     """
     has_rate_limit_error = False
     reset_time_ms = None
-    try:
-        err = json.loads(data)
-    except Exception as e:
-        logger.warning('Json.loads error %s', e)
-        logger.warning(
-            'Json decode failed. status=%s request_body=%s response_body=%s',
-            response_status,
-            _format_for_log(request_body),
-            _format_for_log(data),
-        )
-    else:
-        if isinstance(err, dict) and "error" in err:
-            code = err["error"].get("code", 0)
-            try:
-                x_rate_limit = int(err["error"]["metadata"]["headers"]["X-RateLimit-Reset"])
-            except (TypeError, KeyError):
-                if code == RATE_LIMIT_ERROR_CODE and (raw := err["error"].get("metadata", {}).get("raw", "")):
-                    issue = check_global_limit(raw) or check_google_error(raw)
-                    if issue:
-                        if config["openrouter"]["global_rate_delay"]:
-                            logger.info("%s, waiting %s seconds.", issue, config["openrouter"]["global_rate_delay"])
-                            await asyncio.sleep(config["openrouter"]["global_rate_delay"])
-                        return False, None
-                x_rate_limit = 0
+    err = None
+    for attempt in range(5):
+        try:
+            err = json.loads(data)
+        except Exception as exc:  # retry on transient decode issues
+            if attempt < 4:
+                continue
+            logger.warning('Json.loads error %s', exc)
+            logger.warning(
+                'Json decode failed. status=%s request_body=%s response_body=%s',
+                response_status,
+                _format_for_log(request_body),
+                _format_for_log(data),
+            )
+        else:
+            break
+    if isinstance(err, dict) and "error" in err:
+        code = err["error"].get("code", 0)
+        try:
+            x_rate_limit = int(err["error"]["metadata"]["headers"]["X-RateLimit-Reset"])
+        except (TypeError, KeyError):
+            if code == RATE_LIMIT_ERROR_CODE and (raw := err["error"].get("metadata", {}).get("raw", "")):
+                issue = check_global_limit(raw) or check_google_error(raw)
+                if issue:
+                    if config["openrouter"]["global_rate_delay"]:
+                        logger.info("%s, waiting %s seconds.", issue, config["openrouter"]["global_rate_delay"])
+                        await asyncio.sleep(config["openrouter"]["global_rate_delay"])
+                    return False, None
+            x_rate_limit = 0
 
-            if x_rate_limit > 0:
-                has_rate_limit_error = True
-                reset_time_ms = x_rate_limit
-            elif code == RATE_LIMIT_ERROR_CODE:
-                has_rate_limit_error = True
+        if x_rate_limit > 0:
+            has_rate_limit_error = True
+            reset_time_ms = x_rate_limit
+        elif code == RATE_LIMIT_ERROR_CODE:
+            has_rate_limit_error = True
 
     return has_rate_limit_error, reset_time_ms
