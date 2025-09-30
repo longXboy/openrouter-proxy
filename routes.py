@@ -14,7 +14,7 @@ from fastapi.responses import StreamingResponse, Response
 from config import config, logger
 from constants import MODELS_ENDPOINTS
 from key_manager import KeyManager, mask_key
-from utils import verify_access_key, check_rate_limit
+from utils import verify_access_key, check_rate_limit, UnexpectedFinishReasonError
 
 # Create router
 router = APIRouter()
@@ -26,6 +26,9 @@ key_manager = KeyManager(
     strategy=config["openrouter"]["key_selection_strategy"],
     opts=config["openrouter"]["key_selection_opts"],
 )
+
+
+MAX_PROXY_RETRIES = 3
 
 
 @asynccontextmanager
@@ -126,16 +129,17 @@ async def proxy_endpoint(
     return await proxy_with_httpx(request, path, api_key, is_stream)
 
 
-async def proxy_with_httpx(
+async def _proxy_with_httpx_once(
     request: Request,
+    *,
     path: str,
     api_key: str,
     is_stream: bool,
+    free_only: bool,
+    request_body_bytes: bytes,
 ) -> Response:
-    """Core logic to proxy requests."""
-    free_only = (any(f"/api/v1{path}" == ep for ep in MODELS_ENDPOINTS) and
-                 config["openrouter"]["free_only"])
-    request_body_bytes = await request.body()
+    """Execute a single attempt forwarding the request to OpenRouter."""
+
     req_kwargs = {
         "method": request.method,
         "url": f"{config['openrouter']['base_url']}{path}",
@@ -147,6 +151,8 @@ async def proxy_with_httpx(
         req_kwargs["headers"]["Authorization"] = f"Bearer {api_key}"
 
     client = await get_async_client(request)
+    openrouter_resp: Optional[httpx.Response] = None
+    should_close = True
     try:
         openrouter_req = client.build_request(**req_kwargs)
         openrouter_resp = await client.send(openrouter_req, stream=is_stream)
@@ -161,7 +167,6 @@ async def proxy_with_httpx(
             openrouter_resp.raise_for_status()
 
         headers = dict(openrouter_resp.headers)
-        # Content has already been decoded
         headers.pop("content-encoding", None)
         headers.pop("Content-Encoding", None)
 
@@ -186,7 +191,7 @@ async def proxy_with_httpx(
             last_json = ""
             try:
                 async for line in openrouter_resp.aiter_lines():
-                    if line.startswith("data: {"): # get json only
+                    if line.startswith("data: {"):
                         last_json = line[6:]
                     yield f"{line}\n\n".encode("utf-8")
             except Exception as err:
@@ -200,20 +205,25 @@ async def proxy_with_httpx(
                 response_status=openrouter_resp.status_code,
             )
 
-
+        should_close = False
         return StreamingResponse(
             sse_stream(),
             status_code=openrouter_resp.status_code,
             media_type="text/event-stream",
             headers=headers,
         )
+    except UnexpectedFinishReasonError:
+        raise
     except httpx.HTTPStatusError as e:
-        await check_httpx_err(
-            e.response.content,
-            api_key,
-            request_body=request_body_bytes,
-            response_status=e.response.status_code,
-        )
+        try:
+            await check_httpx_err(
+                e.response.content,
+                api_key,
+                request_body=request_body_bytes,
+                response_status=e.response.status_code,
+            )
+        except UnexpectedFinishReasonError:
+            raise
         logger.error("Request error: %s", str(e))
         raise HTTPException(e.response.status_code, str(e.response.content)) from e
     except httpx.ConnectError as e:
@@ -225,6 +235,113 @@ async def proxy_with_httpx(
     except Exception as e:
         logger.error("Internal error: %s", str(e))
         raise HTTPException(status_code=500, detail="Internal Proxy Error") from e
+    finally:
+        if should_close and openrouter_resp is not None:
+            await openrouter_resp.aclose()
+
+
+async def proxy_with_httpx(
+    request: Request,
+    path: str,
+    api_key: str,
+    is_stream: bool,
+) -> Response:
+    """Proxy request with retries when forwarding to OpenRouter fails."""
+
+    free_only = (any(f"/api/v1{path}" == ep for ep in MODELS_ENDPOINTS) and
+                 config["openrouter"]["free_only"])
+    request_body_bytes = await request.body()
+
+    total_attempts = MAX_PROXY_RETRIES + 1
+    current_api_key = api_key
+    rotate_keys = bool(api_key)
+    last_exception: Optional[Exception] = None
+    attempts_made = 0
+
+    for attempt in range(total_attempts):
+        attempt_number = attempt + 1
+        attempts_made = attempt_number
+        if attempt > 0:
+            if rotate_keys:
+                previous_key = current_api_key
+                try:
+                    current_api_key = await key_manager.get_next_key()
+                    logger.info(
+                        "Retrying request (%s/%s) with API key %s (previous %s)",
+                        attempt_number,
+                        total_attempts,
+                        mask_key(current_api_key),
+                        mask_key(previous_key),
+                    )
+                except HTTPException as err:
+                    last_exception = err
+                    logger.error(
+                        "Unable to acquire replacement API key for retry (%s/%s): %s",
+                        attempt_number,
+                        total_attempts,
+                        err.detail,
+                    )
+                    break
+            else:
+                logger.info(
+                    "Retrying request (%s/%s) without API key rotation",
+                    attempt_number,
+                    total_attempts,
+                )
+
+        try:
+            return await _proxy_with_httpx_once(
+                request,
+                path=path,
+                api_key=current_api_key,
+                is_stream=is_stream,
+                free_only=free_only,
+                request_body_bytes=request_body_bytes,
+            )
+        except UnexpectedFinishReasonError as err:
+            last_exception = err
+            logger.warning(
+                "Attempt %s/%s failed due to unexpected finish_reason: %s",
+                attempt_number,
+                total_attempts,
+                err,
+            )
+        except HTTPException as err:
+            last_exception = err
+            logger.warning(
+                "Attempt %s/%s failed with HTTPException %s: %s",
+                attempt_number,
+                total_attempts,
+                err.status_code,
+                err.detail,
+            )
+        except Exception as err:
+            last_exception = err
+            logger.warning(
+                "Attempt %s/%s failed with error: %s",
+                attempt_number,
+                total_attempts,
+                err,
+            )
+
+    if last_exception is None:
+        raise HTTPException(status_code=500, detail="Internal Proxy Error")
+
+    logger.error(
+        "Proxy request to %s failed after %s attempt(s) (max %s).",
+        path,
+        attempts_made,
+        total_attempts,
+    )
+
+    if isinstance(last_exception, UnexpectedFinishReasonError):
+        raise HTTPException(
+            status_code=502,
+            detail="Unexpected finish reason from upstream response",
+        ) from last_exception
+    if isinstance(last_exception, HTTPException):
+        raise last_exception
+    raise HTTPException(status_code=500, detail="Internal Proxy Error") from last_exception
 
 
 @router.get("/health")
