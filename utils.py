@@ -131,6 +131,7 @@ async def check_rate_limit(
     *,
     request_body: str | bytes | None = None,
     response_status: Optional[int] = None,
+    is_stream: bool = False,
 ) -> Tuple[bool, Optional[int]]:
     """
     Check for rate limit error.
@@ -174,7 +175,7 @@ async def check_rate_limit(
             reset_time_ms = x_rate_limit
         elif code == RATE_LIMIT_ERROR_CODE:
             has_rate_limit_error = True
-    if not has_rate_limit_error:
+    if not has_rate_limit_error and not is_stream:
         finish_reason = None
         if isinstance(payload, dict):
             choices = payload.get("choices")
