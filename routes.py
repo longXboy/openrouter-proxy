@@ -15,9 +15,13 @@ from config import config, logger
 from constants import MODELS_ENDPOINTS
 from key_manager import KeyManager, mask_key
 from utils import verify_access_key, check_rate_limit, UnexpectedFinishReasonError
+from request_logger import RequestLogger
 
 # Create router
 router = APIRouter()
+
+# Initialize request logger
+request_logger = RequestLogger(log_file="requests.log", max_entries=100)
 
 # Initialize key manager
 key_manager = KeyManager(
@@ -171,6 +175,15 @@ async def _proxy_with_httpx_once(
 
         if not is_stream:
             body = openrouter_resp.content
+
+            # Log request and response before check_httpx_err
+            await request_logger.log_request(
+                request_body=request_body_bytes,
+                response_body=body,
+                status_code=openrouter_resp.status_code,
+                path=path,
+            )
+
             await check_httpx_err(
                 body,
                 api_key,
@@ -179,6 +192,7 @@ async def _proxy_with_httpx_once(
             )
             if free_only:
                 body = remove_paid_models(body)
+
             return Response(
                 content=body,
                 status_code=openrouter_resp.status_code,
@@ -188,15 +202,26 @@ async def _proxy_with_httpx_once(
 
         async def sse_stream():
             last_json = ""
+            full_response = []
             try:
                 async for line in openrouter_resp.aiter_lines():
                     if line.startswith("data: {"):
                         last_json = line[6:]
+                        full_response.append(last_json)
                     yield f"{line}\n\n".encode("utf-8")
             except Exception as err:
                 logger.error("sse_stream error: %s", err)
             finally:
                 await openrouter_resp.aclose()
+
+            # Log streaming request and response before check_httpx_err
+            await request_logger.log_request(
+                request_body=request_body_bytes,
+                response_body="\n".join(full_response),
+                status_code=openrouter_resp.status_code,
+                path=path,
+            )
+
             await check_httpx_err(
                 last_json,
                 api_key,
@@ -223,15 +248,43 @@ async def _proxy_with_httpx_once(
             )
         except UnexpectedFinishReasonError:
             raise
+        # Log error response
+        await request_logger.log_request(
+            request_body=request_body_bytes,
+            response_body=e.response.content,
+            status_code=e.response.status_code,
+            path=path,
+        )
         logger.error("Request error: %s", str(e))
         raise HTTPException(e.response.status_code, str(e.response.content)) from e
     except httpx.ConnectError as e:
+        # Log connection error
+        await request_logger.log_request(
+            request_body=request_body_bytes,
+            response_body=f"Connection error: {str(e)}",
+            status_code=503,
+            path=path,
+        )
         logger.error("Connection error to OpenRouter: %s", str(e))
         raise HTTPException(503, "Unable to connect to OpenRouter API") from e
     except httpx.TimeoutException as e:
+        # Log timeout error
+        await request_logger.log_request(
+            request_body=request_body_bytes,
+            response_body=f"Timeout: {str(e)}",
+            status_code=504,
+            path=path,
+        )
         logger.error("Timeout connecting to OpenRouter: %s", str(e))
         raise HTTPException(504, "OpenRouter API request timed out") from e
     except Exception as e:
+        # Log internal error
+        await request_logger.log_request(
+            request_body=request_body_bytes,
+            response_body=f"Internal error: {str(e)}",
+            status_code=500,
+            path=path,
+        )
         logger.error("Internal error: %s", str(e))
         raise HTTPException(status_code=500, detail="Internal Proxy Error") from e
     finally:
