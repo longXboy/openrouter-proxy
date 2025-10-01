@@ -153,7 +153,29 @@ async def check_rate_limit(
             _format_for_log(request_body),
             _format_for_log(data),
         )
-    else:
+        raise e
+
+    if isinstance(payload, dict) and "error" in payload:
+        code = payload["error"].get("code", 0)
+        try:
+            x_rate_limit = int(payload["error"]["metadata"]["headers"]["X-RateLimit-Reset"])
+        except (TypeError, KeyError):
+            if code == RATE_LIMIT_ERROR_CODE and (raw := payload["error"].get("metadata", {}).get("raw", "")):
+                issue = check_global_limit(raw) or check_google_error(raw)
+                if issue:
+                    if config["openrouter"]["global_rate_delay"]:
+                        logger.info("%s, waiting %s seconds.", issue, config["openrouter"]["global_rate_delay"])
+                        await asyncio.sleep(config["openrouter"]["global_rate_delay"])
+                    return False, None
+            x_rate_limit = 0
+
+        if x_rate_limit > 0:
+            has_rate_limit_error = True
+            reset_time_ms = x_rate_limit
+        elif code == RATE_LIMIT_ERROR_CODE:
+            has_rate_limit_error = True
+    if not has_rate_limit_error:
+        finish_reason = None
         if isinstance(payload, dict):
             choices = payload.get("choices")
             if (
@@ -162,34 +184,13 @@ async def check_rate_limit(
                 and isinstance(choices[0], dict)
             ):
                 finish_reason = choices[0].get("finish_reason")
-                if finish_reason not in ALLOWED_FINISH_REASONS:
-                    logger.warning(
-                        'Unexpected finish_reason=%s status=%s request_body=%s response_body=%s',
-                        finish_reason,
-                        response_status,
-                        _format_for_log(request_body),
-                        _format_for_log(data),
-                    )
-                    raise UnexpectedFinishReasonError(finish_reason or "")
-
-        if isinstance(payload, dict) and "error" in payload:
-            code = payload["error"].get("code", 0)
-            try:
-                x_rate_limit = int(payload["error"]["metadata"]["headers"]["X-RateLimit-Reset"])
-            except (TypeError, KeyError):
-                if code == RATE_LIMIT_ERROR_CODE and (raw := payload["error"].get("metadata", {}).get("raw", "")):
-                    issue = check_global_limit(raw) or check_google_error(raw)
-                    if issue:
-                        if config["openrouter"]["global_rate_delay"]:
-                            logger.info("%s, waiting %s seconds.", issue, config["openrouter"]["global_rate_delay"])
-                            await asyncio.sleep(config["openrouter"]["global_rate_delay"])
-                        return False, None
-                x_rate_limit = 0
-
-            if x_rate_limit > 0:
-                has_rate_limit_error = True
-                reset_time_ms = x_rate_limit
-            elif code == RATE_LIMIT_ERROR_CODE:
-                has_rate_limit_error = True
-
+        if finish_reason is None or finish_reason not in ALLOWED_FINISH_REASONS:
+            logger.warning(
+                'Unexpected finish_reason=%s status=%s request_body=%s response_body=%s',
+                finish_reason,
+                response_status,
+                _format_for_log(request_body),
+                _format_for_log(data),
+            )
+            raise UnexpectedFinishReasonError(finish_reason or "missing")
     return has_rate_limit_error, reset_time_ms
