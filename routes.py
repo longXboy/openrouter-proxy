@@ -56,8 +56,7 @@ async def check_httpx_err(
     response_status: Optional[int] = None,
 ):
     # too big or small for error
-    if 10 > len(body) > 4000 or not api_key:
-        return
+  
     has_rate_limit_error, reset_time_ms = await check_rate_limit(
         body,
         request_body=request_body,
