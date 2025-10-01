@@ -58,6 +58,7 @@ async def check_httpx_err(
     *,
     request_body: str | bytes | None = None,
     response_status: Optional[int] = None,
+    is_stream: bool = False,
 ):
     # too big or small for error
   
@@ -65,6 +66,7 @@ async def check_httpx_err(
         body,
         request_body=request_body,
         response_status=response_status,
+        is_stream=is_stream,
     )
     if has_rate_limit_error:
         await key_manager.disable_key(api_key, reset_time_ms)
@@ -202,12 +204,20 @@ async def _proxy_with_httpx_once(
 
         async def sse_stream():
             last_json = ""
+            last_finish_json = ""
             full_response = []
             try:
                 async for line in openrouter_resp.aiter_lines():
                     if line.startswith("data: {"):
                         last_json = line[6:]
                         full_response.append(last_json)
+                        # Track the last chunk with a valid finish_reason
+                        try:
+                            data = json.loads(last_json)
+                            if data.get("choices", [{}])[0].get("finish_reason"):
+                                last_finish_json = last_json
+                        except:
+                            pass
                     yield f"{line}\n\n".encode("utf-8")
             except Exception as err:
                 logger.error("sse_stream error: %s", err)
@@ -222,11 +232,14 @@ async def _proxy_with_httpx_once(
                 path=path,
             )
 
+            # Use the chunk with finish_reason if available, otherwise use last chunk
+            check_json = last_finish_json or last_json
             await check_httpx_err(
-                last_json,
+                check_json,
                 api_key,
                 request_body=request_body_bytes,
                 response_status=openrouter_resp.status_code,
+                is_stream=True,
             )
 
         should_close = False
